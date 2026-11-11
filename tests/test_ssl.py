@@ -1125,9 +1125,9 @@ class TestContext:
             for (conn, where, ret) in called
             if not isinstance(conn, Connection)
         ]
-        assert [] == notConnections, (
-            "Some info callback arguments were not Connection instances."
-        )
+        assert (
+            [] == notConnections
+        ), "Some info callback arguments were not Connection instances."
 
     @pytest.mark.skipif(
         not getattr(_lib, "Cryptography_HAS_KEYLOG", None),
@@ -2647,6 +2647,154 @@ class TestConnection:
         del original, replacement
         collect()
 
+    def test_set_context_applies_new_verify_callback(self) -> None:
+        """
+        `Connection.set_context` adopts the new `Context`'s verify mode and
+        verify callback.  OpenSSL copies these into the ``SSL`` object at
+        ``SSL_new`` time and ``SSL_set_SSL_CTX`` does not update them, so
+        unless pyOpenSSL re-applies them the original `Context`'s
+        verification policy keeps governing the connection.
+
+        Two connections sharing one initial `Context` are switched to
+        different tenant contexts by the servername callback and their
+        handshakes are driven interleaved.  The exception raised by one
+        tenant's verify callback must surface on that tenant's connection
+        only, while the other tenant's handshake completes.
+        """
+
+        class TenantRejected(Exception):
+            pass
+
+        root_cert = load_certificate(FILETYPE_PEM, root_cert_pem)
+
+        def tenant_context(callback):  # type: ignore[no-untyped-def]
+            ctx = Context(SSLv23_METHOD)
+            ctx.use_privatekey(load_privatekey(FILETYPE_PEM, server_key_pem))
+            ctx.use_certificate(
+                load_certificate(FILETYPE_PEM, server_cert_pem)
+            )
+            ctx.set_verify(VERIFY_PEER | VERIFY_FAIL_IF_NO_PEER_CERT, callback)
+            store = ctx.get_cert_store()
+            assert store is not None
+            store.add_cert(root_cert)
+            return ctx
+
+        exc = TenantRejected("tenant A verify callback failed")
+        tenant_a_connections = []
+
+        def verify_a(conn, cert, errno, depth, ok):  # type: ignore[no-untyped-def]
+            tenant_a_connections.append(conn)
+            raise exc
+
+        tenant_b_connections = []
+
+        def verify_b(conn, cert, errno, depth, ok):  # type: ignore[no-untyped-def]
+            tenant_b_connections.append(conn)
+            return True
+
+        tenants = {
+            b"a.example.com": tenant_context(verify_a),
+            b"b.example.com": tenant_context(verify_b),
+        }
+
+        base_context = Context(SSLv23_METHOD)
+        base_context.use_privatekey(
+            load_privatekey(FILETYPE_PEM, server_key_pem)
+        )
+        base_context.use_certificate(
+            load_certificate(FILETYPE_PEM, server_cert_pem)
+        )
+        base_context.set_tlsext_servername_callback(
+            lambda conn: conn.set_context(tenants[conn.get_servername()])  # type: ignore[index]
+        )
+
+        def make_client(servername: bytes) -> Connection:
+            ctx = Context(SSLv23_METHOD)
+            ctx.use_privatekey(load_privatekey(FILETYPE_PEM, client_key_pem))
+            ctx.use_certificate(
+                load_certificate(FILETYPE_PEM, client_cert_pem)
+            )
+            conn = Connection(ctx, None)
+            conn.set_tlsext_host_name(servername)
+            conn.set_connect_state()
+            return conn
+
+        def make_server() -> Connection:
+            conn = Connection(base_context, None)
+            conn.set_accept_state()
+            return conn
+
+        def pump(src: Connection, dst: Connection) -> None:
+            while True:
+                try:
+                    data = src.bio_read(4096)
+                except WantReadError:
+                    break
+                dst.bio_write(data)
+
+        server_a, client_a = make_server(), make_client(b"a.example.com")
+        server_b, client_b = make_server(), make_client(b"b.example.com")
+
+        # Drive both handshakes interleaved, one `do_handshake` call per
+        # connection at a time, until every connection has either finished
+        # or failed.
+        conns = [client_a, server_a, client_b, server_b]
+        rejected = []
+        finished = set()
+        for _ in range(1000):
+            if len(finished) == len(conns):
+                break
+            for i, conn in enumerate(conns):
+                if i in finished:
+                    continue
+                try:
+                    conn.do_handshake()
+                except WantReadError:
+                    pass
+                except TenantRejected as e:
+                    rejected.append((conn, e))
+                    finished.add(i)
+                except Error:
+                    # The peer of a rejected connection fails with the
+                    # alert sent by the rejecting side.
+                    finished.add(i)
+                else:
+                    finished.add(i)
+                pump(conn, conns[i ^ 1])
+
+        # The exception object raised by tenant A's verify callback is
+        # delivered exactly once, on tenant A's connection, by the
+        # `do_handshake` call that OpenSSL returned control to.
+        assert rejected == [(server_a, exc)]
+        assert tenant_a_connections == [server_a]
+
+        # Tenant B's verify callback ran on tenant B's connection and its
+        # handshake completed successfully.
+        assert tenant_b_connections
+        assert set(tenant_b_connections) == {server_b}
+        assert 2 in finished
+        assert 3 in finished
+
+        # A new connection created afterwards from the same contexts is not
+        # affected by the earlier failure: tenant A's callback fires again
+        # and its exception is again attributed to the new connection.
+        server_a2, client_a2 = make_server(), make_client(b"a.example.com")
+        rejected2 = []
+        for _ in range(1000):
+            for conn, peer in [(client_a2, server_a2), (server_a2, client_a2)]:
+                try:
+                    conn.do_handshake()
+                except WantReadError:
+                    pass
+                except TenantRejected as e:
+                    rejected2.append((conn, e))
+                except Error:
+                    pass
+                pump(conn, peer)
+            if rejected2:
+                break
+        assert rejected2 == [(server_a2, exc)]
+
     def test_set_tlsext_host_name_wrong_args(self) -> None:
         """
         If `Connection.set_tlsext_host_name` is called with a non-byte string
@@ -3298,9 +3446,9 @@ class TestConnection:
                 initial_want_write_triggered = True
                 break  # Exit loop as desired error was triggered
 
-        assert initial_want_write_triggered, (
-            f"Could not induce WantWriteError within {i + 1} attempts"
-        )
+        assert (
+            initial_want_write_triggered
+        ), f"Could not induce WantWriteError within {i + 1} attempts"
         return msg
 
     def _drain_server_buffers(self, server: Connection) -> None:

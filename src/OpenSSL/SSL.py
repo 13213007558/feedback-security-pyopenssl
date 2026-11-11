@@ -2097,6 +2097,18 @@ class Connection:
             raise TypeError("context must be a Context instance")
 
         _lib.SSL_set_SSL_CTX(self._ssl, context._context)
+        # SSL_set_SSL_CTX does not propagate the verify mode or verify
+        # callback from the new Context to the SSL object (OpenSSL copies
+        # them into the SSL at SSL_new time).  Re-apply them so that the
+        # new Context's verification policy actually governs this
+        # connection, and keep the new helper alive as __init__ does.
+        _lib.SSL_set_verify(
+            self._ssl,
+            context.get_verify_mode(),
+            context._verify_callback or _ffi.NULL,
+        )
+        self._verify_helper = context._verify_helper
+        self._verify_callback = context._verify_callback
         self._context = context
         self._context._used = True
 
