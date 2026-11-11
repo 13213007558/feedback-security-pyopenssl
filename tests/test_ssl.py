@@ -13,6 +13,7 @@ import gc
 import os
 import pathlib
 import select
+import struct
 import sys
 import time
 import typing
@@ -4704,6 +4705,301 @@ class TestMemoryBIO:
             return [cadesc, sedesc]
 
         self._check_client_ca_list(set_replaces_add_ca)
+
+    # --- memory BIO shutdown / truncation semantics ---------------------
+
+    def _memory_pair(self) -> tuple[Connection, Connection]:
+        """
+        Return a server/client pair connected through memory BIOs and with
+        the TLS handshake already completed, mimicking two connections driven
+        by an external event loop.
+        """
+        server_conn = self._server(None)
+        client_conn = self._client(None)
+        interact_in_memory(client_conn, server_conn)
+        return server_conn, client_conn
+
+    def _drain_output(
+        self, source: Connection, destination: Connection
+    ) -> None:
+        """
+        Move every TLS record currently buffered in ``source``'s write BIO
+        into ``destination``'s read BIO, in fixed-size slices so the
+        destination processes each record the way a real socket would
+        deliver it.
+        """
+        while True:
+            try:
+                chunk = source.bio_read(4096)
+            except WantReadError:
+                return
+            for index in range(0, len(chunk), 7):
+                destination.bio_write(chunk[index : index + 7])
+
+    def _flush(
+        self, client_conn: Connection, server_conn: Connection
+    ) -> None:
+        """
+        Pump buffered TLS records in both directions until neither side has
+        anything left to say.
+        """
+        self._drain_output(client_conn, server_conn)
+        self._drain_output(server_conn, client_conn)
+
+    def _wire_records(self, conn: Connection) -> bytes:
+        """
+        Read every TLS record ``conn`` has produced into its write BIO.
+        """
+        records = bytearray()
+        while True:
+            try:
+                records.extend(conn.bio_read(4096))
+            except WantReadError:
+                return bytes(records)
+
+    def test_clean_close_notify(self) -> None:
+        """
+        A complete close_notify alert is reported as a real EOF
+        (`ZeroReturnError`), not as a `WantReadError`, and only after the
+        application data already in the stream has been delivered.
+        """
+        server_conn, client_conn = self._memory_pair()
+        payload = b"audit-log-complete"
+
+        client_conn.send(payload)
+        self._flush(client_conn, server_conn)
+
+        # The plaintext is delivered before any end-of-stream signal.
+        assert server_conn.recv(1024) == payload
+        with pytest.raises(WantReadError):
+            server_conn.recv(1024)
+
+        # One-way shutdown: the peer has only sent its half of the closure.
+        assert client_conn.shutdown() is False
+        assert client_conn.get_shutdown() == SENT_SHUTDOWN
+        self._flush(client_conn, server_conn)
+
+        with pytest.raises(ZeroReturnError):
+            server_conn.recv(1024)
+        assert server_conn.get_shutdown() == RECEIVED_SHUTDOWN
+
+        # The clean EOF must never look like an empty application read.
+        assert not issubclass(ZeroReturnError, WantReadError)
+
+        # Completing our half makes the shutdown mutual.
+        assert server_conn.shutdown() is True
+        assert server_conn.get_shutdown() == (
+            SENT_SHUTDOWN | RECEIVED_SHUTDOWN
+        )
+
+    def test_bio_shutdown_without_alert(self) -> None:
+        """
+        Closing the underlying transport without any TLS alert is a
+        truncation: the reader gets `SysCallError`, never a clean EOF and
+        never `WantReadError`, so an incomplete audit file cannot be
+        mistaken for a finished download.
+        """
+        server_conn, client_conn = self._memory_pair()
+
+        server_conn.bio_shutdown()
+
+        with pytest.raises(SysCallError) as err:
+            server_conn.recv(1024)
+        assert type(err.value) is SysCallError
+        assert err.value.args[0] == -1
+        # The message wording varies between OpenSSL releases, but the
+        # truncation classification above does not.
+        assert server_conn.get_shutdown() == 0
+
+    def test_truncated_record_header(self) -> None:
+        """
+        If only part of a five-byte record header arrives before the
+        transport goes away, `bio_shutdown` turns the would-be
+        `WantReadError` into a truncation error rather than an empty read.
+        """
+        server_conn, client_conn = self._memory_pair()
+
+        client_conn.send(b"truncated-header")
+        records = self._wire_records(client_conn)
+        # Two of the five header bytes, then nothing.
+        server_conn.bio_write(records[:2])
+
+        with pytest.raises(WantReadError):
+            server_conn.recv(1024)
+
+        server_conn.bio_shutdown()
+        with pytest.raises(SysCallError) as err:
+            server_conn.recv(1024)
+        assert type(err.value) is SysCallError
+        assert err.value.args[0] == -1
+        assert server_conn.get_shutdown() == 0
+
+    def test_truncated_record_payload(self) -> None:
+        """
+        A complete record header promising more ciphertext bytes than ever
+        arrive is a truncation, not an EOF: the missing bytes must not be
+        silently replaced by an empty read.
+        """
+        server_conn, client_conn = self._memory_pair()
+
+        client_conn.send(b"truncated-payload")
+        records = self._wire_records(client_conn)
+        declared_length = struct.unpack(">H", records[3:5])[0]
+        assert declared_length > 1
+        # Full header plus only half of the ciphertext it promises.
+        server_conn.bio_write(records[: 5 + declared_length // 2])
+
+        with pytest.raises(WantReadError):
+            server_conn.recv(1024)
+
+        server_conn.bio_shutdown()
+        with pytest.raises(SysCallError) as err:
+            server_conn.recv(1024)
+        assert type(err.value) is SysCallError
+        assert err.value.args[0] == -1
+        assert server_conn.get_shutdown() == 0
+
+    def test_buffered_plaintext_then_truncation(self) -> None:
+        """
+        Application data fully buffered before the transport dies is still
+        delivered first, but the read after it must surface the truncation
+        instead of a clean EOF, so the caller knows the stream was cut.
+        """
+        server_conn, client_conn = self._memory_pair()
+        payload = b"whole-record-no-alert"
+
+        client_conn.send(payload)
+        self._flush(client_conn, server_conn)
+        server_conn.bio_shutdown()
+
+        # The complete plaintext is readable ...
+        assert server_conn.recv(1024) == payload
+        # ... but there is no clean end to the stream behind it.
+        with pytest.raises(SysCallError) as err:
+            server_conn.recv(1024)
+        assert type(err.value) is SysCallError
+        assert err.value.args[0] == -1
+        assert server_conn.get_shutdown() == 0
+
+    def test_local_shutdown_is_not_mutual_eof(self) -> None:
+        """
+        Sending our own close_notify only completes our half of the
+        shutdown.  Until the peer's close_notify comes back, reads stay at
+        `WantReadError`; the peer's alert then produces `ZeroReturnError`.
+        """
+        server_conn, client_conn = self._memory_pair()
+
+        # First SSL_shutdown() sends the alert but cannot complete.
+        assert server_conn.shutdown() is False
+        assert server_conn.get_shutdown() == SENT_SHUTDOWN
+
+        # Without the peer's reply this is still not EOF.
+        with pytest.raises(WantReadError):
+            server_conn.recv(1024)
+
+        self._flush(client_conn, server_conn)
+
+        # The client received a real close_notify ...
+        with pytest.raises(ZeroReturnError):
+            client_conn.recv(1024)
+        assert client_conn.get_shutdown() == RECEIVED_SHUTDOWN
+        # ... and its own shutdown completes the mutual handshake.
+        assert client_conn.shutdown() is True
+        assert client_conn.get_shutdown() == (
+            SENT_SHUTDOWN | RECEIVED_SHUTDOWN
+        )
+
+        self._flush(client_conn, server_conn)
+        assert server_conn.shutdown() is True
+        assert server_conn.get_shutdown() == (
+            SENT_SHUTDOWN | RECEIVED_SHUTDOWN
+        )
+
+    def test_local_shutdown_peer_truncates(self) -> None:
+        """
+        After we send close_notify, a peer that disconnects instead of
+        replying is still a truncation: the one-way shutdown must not be
+        treated as a clean mutual close.
+        """
+        server_conn, client_conn = self._memory_pair()
+
+        assert server_conn.shutdown() is False
+        assert server_conn.get_shutdown() == SENT_SHUTDOWN
+        self._flush(client_conn, server_conn)
+
+        with pytest.raises(ZeroReturnError):
+            client_conn.recv(1024)
+
+        # The peer's transport vanishes rather than echoing close_notify.
+        server_conn.bio_shutdown()
+        with pytest.raises(SysCallError) as err:
+            server_conn.shutdown()
+        assert type(err.value) is SysCallError
+        assert err.value.args[0] == -1
+        # Our sent half is recorded, but no received half ever arrives.
+        assert server_conn.get_shutdown() == SENT_SHUTDOWN
+
+    def test_fixed_slices_distinguish_wantread_from_eof(self) -> None:
+        """
+        Feeding a real BIO through fixed-size slices keeps returning
+        `WantReadError` while a record is incomplete and only yields
+        plaintext once it is whole; a later close_notify becomes
+        `ZeroReturnError`, while a bare transport close becomes
+        `SysCallError`.
+        """
+        server_conn, client_conn = self._memory_pair()
+        payload = b"fixed-slice-delivery"
+
+        client_conn.send(payload)
+        records = self._wire_records(client_conn)
+
+        # Deliver the application record in three-byte slices.  Every
+        # intermediate read must block rather than fabricate data or EOF.
+        seen = []
+        for index in range(0, len(records), 3):
+            server_conn.bio_write(records[index : index + 3])
+            try:
+                seen.append(server_conn.recv(1024))
+            except WantReadError:
+                pass
+        assert seen == [payload]
+        assert b"" not in seen
+        assert server_conn.get_shutdown() == 0
+
+        with pytest.raises(WantReadError):
+            server_conn.recv(1024)
+
+        # An orderly alert, delivered in the same sliced fashion, is EOF.
+        client_conn.shutdown()
+        self._drain_output(client_conn, server_conn)
+        with pytest.raises(ZeroReturnError):
+            server_conn.recv(1024)
+        assert server_conn.get_shutdown() == RECEIVED_SHUTDOWN
+
+    def test_fixed_slices_then_bare_close_is_truncation(self) -> None:
+        """
+        Fixed-size delivery followed by `bio_shutdown` with no alert is a
+        truncation even though every application record up to that point
+        was whole.
+        """
+        server_conn, client_conn = self._memory_pair()
+        payload = b"whole-then-cut"
+
+        client_conn.send(payload)
+        records = self._wire_records(client_conn)
+        for index in range(0, len(records), 5):
+            server_conn.bio_write(records[index : index + 5])
+
+        assert server_conn.recv(1024) == payload
+        with pytest.raises(WantReadError):
+            server_conn.recv(1024)
+
+        server_conn.bio_shutdown()
+        with pytest.raises(SysCallError) as err:
+            server_conn.recv(1024)
+        assert type(err.value) is SysCallError
+        assert err.value.args[0] == -1
+        assert server_conn.get_shutdown() == 0
 
 
 class TestInfoConstants:
