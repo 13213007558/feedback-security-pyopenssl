@@ -1,0 +1,246 @@
+OpenSSL: OpenSSL 4.0.3 29 Sep 2026
+
+==============================================================================
+1. FRESH CONNECTIONS  (TLS 1.2)
+==============================================================================
+-- connection A
+  version          TLSv1.2
+  resumed          0
+  client_random    f76e4c49baad (len=32)
+  master_key       84f7f2135209 (len=48)
+  local_finished   ca24320926bf (len=12)
+  peer_finished    298db5521cde (len=12)
+  ekm_no_ctx       30a0e80c3903 (len=32)
+  ekm_empty_ctx    84ff6ed7e2af (len=32)
+  ekm_ctx_a        b915f0412e5f (len=32)
+  ekm_ctx_b        fb76c980c070 (len=32)
+  ekm_other_label  90eded5b73f6 (len=32)
+  server_cert_fp   7b8eaa449f72cefd
+  client_cert_fp   None
+-- connection B (same certs, same contexts)
+  version          TLSv1.2
+  resumed          0
+  client_random    764d06f2ca33 (len=32)
+  master_key       c881282663e0 (len=48)
+  local_finished   86fb13350085 (len=12)
+  peer_finished    347a8c25603a (len=12)
+  ekm_no_ctx       b7021acc9f62 (len=32)
+  ekm_empty_ctx    e850edd03ddd (len=32)
+  ekm_ctx_a        8f09811ccca9 (len=32)
+  ekm_ctx_b        81388025460a (len=32)
+  ekm_other_label  1d237454ca9f (len=32)
+  server_cert_fp   7b8eaa449f72cefd
+  client_cert_fp   None
+  no-context == empty-context? NO  (RFC5705 use_context flag changes PRF input)
+  export length: TLS1.2 PRF stream (16B is prefix of 32B/64B)
+  determinism / length-prefix / label+context separation: OK
+  tls-server-end-point (cert SPKI hash): 9870200b0fbd01fa
+
+==============================================================================
+1. FRESH CONNECTIONS  (TLS 1.3)
+==============================================================================
+-- connection A
+  version          TLSv1.3
+  resumed          0
+  client_random    c51e285f1cff (len=32)
+  master_key       12c378fe69f8 (len=48)
+  local_finished   a92f730e9cf3 (len=48)
+  peer_finished    c9264bd7734d (len=48)
+  ekm_no_ctx       e31eef644450 (len=32)
+  ekm_empty_ctx    e31eef644450 (len=32)
+  ekm_ctx_a        c57254a4157d (len=32)
+  ekm_ctx_b        b4ec4bbea7cf (len=32)
+  ekm_other_label  295e985d592b (len=32)
+  server_cert_fp   7b8eaa449f72cefd
+  client_cert_fp   None
+-- connection B (same certs, same contexts)
+  version          TLSv1.3
+  resumed          0
+  client_random    393ad0bedee2 (len=32)
+  master_key       56ebd66840f7 (len=48)
+  local_finished   618b0abe8ce3 (len=48)
+  peer_finished    373ec8538f85 (len=48)
+  ekm_no_ctx       37f34435ae56 (len=32)
+  ekm_empty_ctx    37f34435ae56 (len=32)
+  ekm_ctx_a        2084f5d5f22f (len=32)
+  ekm_ctx_b        448a75c7cc7f (len=32)
+  ekm_other_label  4ec83f3c1d6d (len=32)
+  server_cert_fp   7b8eaa449f72cefd
+  client_cert_fp   None
+  no-context == empty-context? YES (RFC8446 always length-prefixes context)
+  export length: TLS1.3 bakes length into HKDF label (no prefix relation)
+  determinism / length-prefix / label+context separation: OK
+  tls-server-end-point (cert SPKI hash): 9870200b0fbd01fa
+
+==============================================================================
+2. SESSION RESUMPTION  (TLS 1.2)
+==============================================================================
+-- original
+  version          TLSv1.2
+  resumed          0
+  client_random    512c7c52c995 (len=32)
+  master_key       5c6d9fad5911 (len=48)
+  local_finished   220c4d0ea96f (len=12)
+  peer_finished    1a3dcf3fd51c (len=12)
+  ekm_no_ctx       147c8b318f51 (len=32)
+  ekm_empty_ctx    85b3df29b877 (len=32)
+  ekm_ctx_a        56f2bdb023b2 (len=32)
+  ekm_ctx_b        5c466c1bd651 (len=32)
+  ekm_other_label  e1815568ddfc (len=32)
+  server_cert_fp   7b8eaa449f72cefd
+  client_cert_fp   None
+-- resumed
+  version          TLSv1.2
+  resumed          1
+  client_random    568d88136c9f (len=32)
+  master_key       5c6d9fad5911 (len=48)
+  local_finished   abff12b41f1a (len=12)
+  peer_finished    5cc18a0aa783 (len=12)
+  ekm_no_ctx       574d6a32cc17 (len=32)
+  ekm_empty_ctx    9bee02aacddd (len=32)
+  ekm_ctx_a        186a9086ab4b (len=32)
+  ekm_ctx_b        77e59ec6afd7 (len=32)
+  ekm_other_label  6bdb9086aa34 (len=32)
+  server_cert_fp   7b8eaa449f72cefd
+  client_cert_fp   None
+  SSL_session_reused(client) = 1
+  master key reused across resumption? YES (TLS 1.2 session resumption)
+  EKM / Finished / random rotate even though the session is reused
+  certificate identity (tls-server-end-point) stays the same
+
+==============================================================================
+2. SESSION RESUMPTION  (TLS 1.3)
+==============================================================================
+-- original
+  version          TLSv1.3
+  resumed          0
+  client_random    3031dbc4a01d (len=32)
+  master_key       a85b61e98229 (len=48)
+  local_finished   b994d820e37f (len=48)
+  peer_finished    95dbdcc1124a (len=48)
+  ekm_no_ctx       d46c0c98a32b (len=32)
+  ekm_empty_ctx    d46c0c98a32b (len=32)
+  ekm_ctx_a        73b2459a37ca (len=32)
+  ekm_ctx_b        2890a69fdf7e (len=32)
+  ekm_other_label  4f68db31cf55 (len=32)
+  server_cert_fp   7b8eaa449f72cefd
+  client_cert_fp   None
+-- resumed
+  version          TLSv1.3
+  resumed          1
+  client_random    bee2bf53427c (len=32)
+  master_key       79bdcc680f63 (len=48)
+  local_finished   e8650db41315 (len=48)
+  peer_finished    ee7ff666d039 (len=48)
+  ekm_no_ctx       e1d10d6b8795 (len=32)
+  ekm_empty_ctx    e1d10d6b8795 (len=32)
+  ekm_ctx_a        e23c4af0b321 (len=32)
+  ekm_ctx_b        5a1850f86088 (len=32)
+  ekm_other_label  abb6257792fa (len=32)
+  server_cert_fp   7b8eaa449f72cefd
+  client_cert_fp   None
+  SSL_session_reused(client) = 1
+  TLS 1.3 master key readable here?: True (OpenSSL 3.x erases it, 4.0 exposes the resumption master secret)
+  EKM / Finished / random rotate even though the session is reused
+  certificate identity (tls-server-end-point) stays the same
+
+==============================================================================
+3a. IDENTITY CHANGE - TLS 1.3 POST-HANDSHAKE AUTHENTICATION (PHA)
+==============================================================================
+-- initial handshake (no client cert)
+  version          TLSv1.3
+  resumed          0
+  client_random    e878e7636476 (len=32)
+  master_key       4755145e53ff (len=48)
+  local_finished   7dff512870f7 (len=48)
+  peer_finished    7c49a81fcfe5 (len=48)
+  ekm_no_ctx       c4597ab6a590 (len=32)
+  ekm_empty_ctx    c4597ab6a590 (len=32)
+  ekm_ctx_a        973082b0103b (len=32)
+  ekm_ctx_b        e673ddb67e01 (len=32)
+  ekm_other_label  65752aa8f481 (len=32)
+  server_cert_fp   7b8eaa449f72cefd
+  client_cert_fp   None
+-- after PHA #1 (client-a)
+  version          TLSv1.3
+  resumed          0
+  client_random    e878e7636476 (len=32)
+  master_key       6fcd24af30ea (len=48)
+  local_finished   9de057fe35a7 (len=48)
+  peer_finished    7c49a81fcfe5 (len=48)
+  ekm_no_ctx       c4597ab6a590 (len=32)
+  ekm_empty_ctx    c4597ab6a590 (len=32)
+  ekm_ctx_a        973082b0103b (len=32)
+  ekm_ctx_b        e673ddb67e01 (len=32)
+  ekm_other_label  65752aa8f481 (len=32)
+  server_cert_fp   7b8eaa449f72cefd
+  client_cert_fp   b3b746527de4426b
+-- after PHA #2 (client-b)
+  version          TLSv1.3
+  resumed          0
+  client_random    e878e7636476 (len=32)
+  master_key       11667470df5f (len=48)
+  local_finished   076b00ca3735 (len=48)
+  peer_finished    7c49a81fcfe5 (len=48)
+  ekm_no_ctx       c4597ab6a590 (len=32)
+  ekm_empty_ctx    c4597ab6a590 (len=32)
+  ekm_ctx_a        973082b0103b (len=32)
+  ekm_ctx_b        e673ddb67e01 (len=32)
+  ekm_other_label  65752aa8f481 (len=32)
+  server_cert_fp   7b8eaa449f72cefd
+  client_cert_fp   0beffab9aba81965
+  EKM unchanged across both PHA rounds -> it does NOT encode the client cert
+  server (peer) Finished stable; client get_finished() rewritten per PHA round
+  client cert seen by server changed: b3b746527de4426b -> 0beffab9aba81965
+  note: RFC9266 transcript-context EKM is not reachable via pyOpenSSL (no transcript API);
+        only application-supplied context can tag the new identity (see suite 4).
+
+==============================================================================
+3b. IDENTITY CHANGE - TLS 1.2 RENEGOTIATION (OpenSSL legacy path)
+==============================================================================
+-- initial handshake (client-a already presented)
+  version          TLSv1.2
+  resumed          0
+  client_random    ad2aa1fba117 (len=32)
+  master_key       2a28af02d884 (len=48)
+  local_finished   a04ea9685d6d (len=12)
+  peer_finished    f48735f87623 (len=12)
+  ekm_no_ctx       a11aa143b1ad (len=32)
+  ekm_empty_ctx    2f98d759c0b6 (len=32)
+  ekm_ctx_a        0685ac84fac1 (len=32)
+  ekm_ctx_b        4a02c4c79969 (len=32)
+  ekm_other_label  4e015b4e70df (len=32)
+  server_cert_fp   7b8eaa449f72cefd
+  client_cert_fp   b3b746527de4426b
+-- after server-initiated renegotiation
+  version          TLSv1.2
+  resumed          1
+  client_random    3533f5d0c622 (len=32)
+  master_key       2a28af02d884 (len=48)
+  local_finished   48fcb6f5e350 (len=12)
+  peer_finished    f3504e4c657e (len=12)
+  ekm_no_ctx       f056357bab8c (len=32)
+  ekm_empty_ctx    443ea8c8c407 (len=32)
+  ekm_ctx_a        590cf3ae9333 (len=32)
+  ekm_ctx_b        eeb63dde54af (len=32)
+  ekm_other_label  6310f9ff2b36 (len=32)
+  server_cert_fp   7b8eaa449f72cefd
+  client_cert_fp   b3b746527de4426b
+  total_renegotiations = 1
+  EKM / Finished / client_random all changed -> a full re-handshake occurred
+  client cert identity is merely carried over (no fresh auth on this path)
+  client-initiated renegotiation rejected -> no renegotiation
+  TLS1.3 renegotiate() rejected -> wrong ssl version
+
+==============================================================================
+4. CHANNEL-POSSESSION PROOF vs USER AUTHORIZATION
+==============================================================================
+  proof tag (client): e0c2dfea122afc86739d21ba (len=32)
+  expected  (server): e0c2dfea122afc86739d21ba (len=32)
+  tag from a parallel connection does NOT verify: OK
+  raw EKM stays local; only the HMAC tag is presented to the verifier
+  long-term identity available to the verifier:
+    tls-server-end-point: 9870200b0fbd01fa
+  per-connection secrets (EKM, master key, Finished) are NOT identities
+
+ALL ASSERTIONS PASSED
