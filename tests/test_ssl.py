@@ -306,6 +306,27 @@ def _create_certificate_chain() -> list[tuple[PKey, X509]]:
     ]
 
 
+def _make_test_crl() -> x509.CertificateRevocationList:
+    """
+    Build a minimal, currently-valid CRL for use as an opaque mutation argument
+    in `X509Store.add_crl` freeze tests.
+    """
+    issuer_key = rsa.generate_private_key(key_size=2048, public_exponent=65537)
+    issuer_name = x509.Name(
+        [x509.NameAttribute(x509.NameOID.COMMON_NAME, "CRL Issuer")]
+    )
+    return (
+        x509.CertificateRevocationListBuilder()
+        .issuer_name(issuer_name)
+        .last_update(datetime.datetime(2020, 1, 1))
+        .next_update(datetime.datetime(5000, 1, 1))
+        .sign(issuer_key, hashes.SHA256())
+    )
+
+
+_root_crl = _make_test_crl()
+
+
 def loopback_client_factory(
     socket: socket, version: int = SSLv23_METHOD
 ) -> Connection:
@@ -1929,6 +1950,225 @@ class TestContext:
         context = Context(SSLv23_METHOD)
         store = context.get_cert_store()
         assert isinstance(store, X509Store)
+
+    def test_get_cert_store_wraps_single_underlying_store(self) -> None:
+        """
+        Every `Context.get_cert_store` call returns a different Python wrapper
+        around the same underlying C store, so a reference cached earlier and
+        one fetched later are views of one trust store.
+        """
+        context = Context(SSLv23_METHOD)
+        first = context.get_cert_store()
+        second = context.get_cert_store()
+        assert first is not None and second is not None
+        assert first is not second
+        assert first._store == second._store
+        assert first._owner_context is context
+        assert second._owner_context is context
+
+    def test_standalone_store_has_no_owner_and_stays_mutable(self) -> None:
+        """
+        A standalone `X509Store` (not obtained from a Context) is never frozen
+        and remains mutable for its whole lifetime.
+        """
+        store = X509Store()
+        assert store._owner_context is None
+        # No exception: there is no owning Context that could be frozen.
+        store.set_flags(0)
+
+    def test_cert_store_mutable_before_context_is_used(self) -> None:
+        """
+        Building a trust store through `get_cert_store` before any Connection
+        is created is fully allowed (the normal configuration path).
+        """
+        context = Context(SSLv23_METHOD)
+        store = context.get_cert_store()
+        assert store is not None
+        store.add_cert(load_certificate(FILETYPE_PEM, root_cert_pem))
+        store.set_flags(0)
+
+    def _frozen_store_mutators(self) -> list[tuple[str, object]]:
+        return [
+            ("add_cert", load_certificate(FILETYPE_PEM, root_cert_pem)),
+            ("add_crl", _root_crl),
+            ("set_flags", 0),
+            ("set_time", datetime.datetime(2020, 1, 1)),
+        ]
+
+    def test_cached_cert_store_cannot_mutate_frozen_context(self) -> None:
+        """
+        A reference to the trust store obtained *before* the Context was used
+        cannot mutate it once a Connection has frozen the Context. This is the
+        alias that `_require_not_used` on Context methods does not cover.
+        """
+        context = Context(SSLv23_METHOD)
+        store = context.get_cert_store()
+        assert store is not None
+        Connection(context, None)
+
+        for method_name, argument in self._frozen_store_mutators():
+            with pytest.raises(ValueError) as exc_info:
+                getattr(store, method_name)(argument)
+            message = str(exc_info.value)
+            assert "already been used to create a Connection" in message
+            # The message must point the caller at the supported rotation path.
+            assert "set_context" in message
+
+    def test_refetched_cert_store_cannot_mutate_frozen_context(self) -> None:
+        """
+        A trust store wrapper fetched *after* the Context was used is subject
+        to the same freeze, not just wrappers handed out earlier.
+        """
+        context = Context(SSLv23_METHOD)
+        Connection(context, None)
+
+        store = context.get_cert_store()
+        assert store is not None
+        with pytest.raises(ValueError, match="set_context"):
+            store.add_cert(load_certificate(FILETYPE_PEM, root_cert_pem))
+        with pytest.raises(ValueError, match="set_context"):
+            store.set_flags(0)
+
+    def test_cert_store_load_locations_rejected_when_frozen(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """
+        `X509Store.load_locations` is also a trust-anchor mutation and must be
+        refused on a frozen Context's store.
+        """
+        cafile = tmp_path / "ca.pem"
+        cafile.write_bytes(root_cert_pem)
+
+        context = Context(SSLv23_METHOD)
+        store = context.get_cert_store()
+        assert store is not None
+        Connection(context, None)
+
+        with pytest.raises(ValueError, match="set_context"):
+            store.load_locations(bytes(cafile))
+
+    def test_rejected_store_mutation_leaves_no_partial_trust(self) -> None:
+        """
+        A mutation rejected by the freeze must not have changed the store at
+        all: the rejected certificate is not present and a later handshake
+        still does not trust it.
+        """
+        [(_, cacert), (_, icert), (skey, scert)] = _create_certificate_chain()
+        # A second, unrelated anchor that must never end up trusted.
+        _, rogue_cert = _create_certificate_chain()[0]
+
+        server_context = Context(SSLv23_METHOD)
+        server_context.use_privatekey(skey)
+        server_context.use_certificate(scert)
+        server_context.add_extra_chain_cert(icert.to_cryptography())
+        server_context.add_extra_chain_cert(cacert)
+        server = Connection(server_context, None)
+        server.set_accept_state()
+
+        client_context = Context(SSLv23_METHOD)
+        client_context.set_verify(VERIFY_PEER, verify_cb)
+        store = client_context.get_cert_store()
+        assert store is not None
+        # Freeze the client Context with an empty trust store.
+        Connection(client_context, None)
+
+        with pytest.raises(ValueError):
+            store.add_cert(cacert)
+        with pytest.raises(ValueError):
+            store.add_cert(rogue_cert)
+
+        # The rejected anchors are not present in the underlying C store.
+        objects = _lib.X509_STORE_get0_objects(store._store)
+        assert _lib.sk_X509_OBJECT_num(objects) == 0
+
+        client = Connection(client_context, None)
+        client.set_connect_state()
+        with pytest.raises(Error):
+            interact_in_memory(client, server)
+
+    def test_frozen_store_contract_observed_in_handshake(self) -> None:
+        """
+        End-to-end freeze contract over two handshakes with a short chain:
+        injecting a trust anchor through a cached alias after the Context is
+        frozen is refused, so the second handshake keeps trusting only the
+        anchor configured before the freeze.
+        """
+        [(_, cacert), (_, icert), (skey, scert)] = _create_certificate_chain()
+
+        def make_server() -> Connection:
+            server_context = Context(SSLv23_METHOD)
+            server_context.use_privatekey(skey)
+            server_context.use_certificate(scert)
+            server_context.add_extra_chain_cert(icert.to_cryptography())
+            server_context.add_extra_chain_cert(cacert)
+            server = Connection(server_context, None)
+            server.set_accept_state()
+            return server
+
+        client_context = Context(SSLv23_METHOD)
+        client_context.set_verify(VERIFY_PEER, verify_cb)
+        store = client_context.get_cert_store()
+        assert store is not None
+        # Trust the genuine anchor while the Context is still configurable.
+        store.add_cert(cacert)
+        # Freeze by creating the first Connection.
+        first_client = Connection(client_context, None)
+        first_client.set_connect_state()
+        # Handshake #1: trusts cacert, so it succeeds.
+        interact_in_memory(first_client, make_server())
+
+        # Attempting to alter trust afterwards through either alias is refused.
+        with pytest.raises(ValueError):
+            store.add_cert(icert)
+        refetched = client_context.get_cert_store()
+        assert refetched is not None
+        with pytest.raises(ValueError):
+            refetched.set_flags(0)
+
+        # Handshake #2 on the same frozen Context still uses the original,
+        # unchanged trust store and therefore still succeeds with cacert.
+        second_client = Connection(client_context, None)
+        second_client.set_connect_state()
+        interact_in_memory(second_client, make_server())
+
+    def test_trust_rotation_via_new_context_and_set_context(self) -> None:
+        """
+        The supported public rotation path: build and fully configure a fresh
+        Context, then point an existing Connection at it with
+        `Connection.set_context`. The rotated-in Context is itself frozen and
+        its store cannot be mutated afterwards.
+        """
+        [(_, cacert), (_, icert), (skey, scert)] = _create_certificate_chain()
+
+        server_context = Context(SSLv23_METHOD)
+        server_context.use_privatekey(skey)
+        server_context.use_certificate(scert)
+        server_context.add_extra_chain_cert(icert.to_cryptography())
+        server_context.add_extra_chain_cert(cacert)
+
+        # An old client Context with an empty trust store.
+        old_context = Context(SSLv23_METHOD)
+        old_context.set_verify(VERIFY_PEER, verify_cb)
+        connection = Connection(old_context, None)
+
+        # Rotate in a new Context that trusts the required anchor.
+        new_context = Context(SSLv23_METHOD)
+        new_context.set_verify(VERIFY_PEER, verify_cb)
+        new_store = new_context.get_cert_store()
+        assert new_store is not None
+        new_store.add_cert(cacert)
+        connection.set_context(new_context)
+
+        # The rotated-in Context is frozen immediately.
+        with pytest.raises(ValueError):
+            new_store.add_cert(icert)
+
+        # And a Connection built from it completes verification successfully.
+        client = Connection(new_context, None)
+        client.set_connect_state()
+        server = Connection(server_context, None)
+        server.set_accept_state()
+        interact_in_memory(client, server)
 
     def test_set_tlsext_use_srtp_not_bytes(self) -> None:
         """

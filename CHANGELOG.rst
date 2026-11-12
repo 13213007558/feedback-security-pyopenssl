@@ -14,6 +14,15 @@ Backward-incompatible changes:
   `RFC 5280 section 4.1.2.2 <https://datatracker.ietf.org/doc/html/rfc5280#section-4.1.2.2>`_ does not permit.
   Passing one previously crashed the interpreter.
   [`#1534 <https://github.com/pyca/pyopenssl/pull/1534>`_]
+- Mutating the trust store returned by ``OpenSSL.SSL.Context.get_cert_store()``
+  (via ``add_cert``, ``add_crl``, ``set_flags``, ``set_time`` or
+  ``load_locations``) now raises ``ValueError`` once the owning ``Context`` has
+  been used to create a ``Connection``. Previously only the ``Context``'s own
+  setters were frozen, so a cached or re-fetched ``X509Store`` reference could
+  still change the trust anchors and verification parameters of an in-use
+  ``Context``. A standalone ``OpenSSL.crypto.X509Store()`` is unaffected. To
+  rotate trust configuration, build and configure a fresh ``Context`` and
+  switch an existing ``Connection`` to it with ``Connection.set_context``.
 
 Deprecations:
 ^^^^^^^^^^^^^
@@ -23,6 +32,12 @@ Changes:
 
 - Fixed a race in which an exception raised by a verify, ALPN selection, OCSP, or DTLS cookie callback for one ``Connection`` could be raised on an unrelated ``Connection`` created from the same ``Context`` and used concurrently from another thread. Exceptions from these callbacks are now tracked per ``Connection``. Discovered and reported by SecDim Security Research.
 - Fixed exceptions raised by a verify callback registered with ``Connection.set_verify`` being swallowed instead of being propagated to the caller.
+- Closed a freeze bypass in which the ``X509Store`` returned by
+  ``Context.get_cert_store()`` shared the underlying OpenSSL trust store and
+  could be mutated after the ``Context`` had been used to create a
+  ``Connection``. The store now enforces the same freeze contract as the
+  ``Context`` for both references cached before the freeze and wrappers fetched
+  afterwards, and a rejected mutation leaves no partial trust state.
 
 
 26.4.0 (2026-08-01)

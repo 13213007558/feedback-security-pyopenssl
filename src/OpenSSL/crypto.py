@@ -1307,6 +1307,37 @@ class X509Store:
     def __init__(self) -> None:
         store = _lib.X509_STORE_new()
         self._store = _ffi.gc(store, _lib.X509_STORE_free)
+        # When this store is the trust store owned by an
+        # ``OpenSSL.SSL.Context`` (see ``Context.get_cert_store``), this holds
+        # that Context so the store can honour the Context's freeze contract.
+        # A standalone ``X509Store()`` leaves this as ``None`` and remains
+        # freely mutable for its whole lifetime.  Typed as ``Any`` to avoid a
+        # runtime circular import between ``crypto`` and ``SSL``.
+        self._owner_context: Any = None
+
+    def _ensure_mutable(self) -> None:
+        """
+        Reject mutations that would reach a trust store owned by a Context
+        which has already been used to create a Connection.
+
+        Every Python wrapper returned by ``Context.get_cert_store`` points at
+        the same underlying C ``X509_STORE``, so the freeze has to be enforced
+        on the store itself rather than only at ``get_cert_store`` call time.
+        The check runs before any native call so a rejected mutation never
+        leaves a partially updated trust state.
+        """
+        owner = self._owner_context
+        if owner is not None and owner._used:
+            raise ValueError(
+                "The certificate store belongs to a Context that has "
+                "already been used to create a Connection and cannot be "
+                "mutated again. Build a new Context, configure its trust "
+                "anchors (for example with load_verify_locations or "
+                "get_cert_store().add_cert) and verification parameters "
+                "before creating a Connection from it, then switch an "
+                "existing Connection to it with Connection.set_context to "
+                "rotate the trusted configuration."
+            )
 
     def add_cert(self, cert: X509) -> None:
         """
@@ -1324,6 +1355,7 @@ class X509Store:
 
         :return: ``None`` if the certificate was added successfully.
         """
+        self._ensure_mutable()
         if not isinstance(cert, X509):
             raise TypeError()
 
@@ -1345,6 +1377,7 @@ class X509Store:
         :return: ``None`` if the certificate revocation list was added
             successfully.
         """
+        self._ensure_mutable()
         if isinstance(crl, x509.CertificateRevocationList):
             from cryptography.hazmat.primitives.serialization import Encoding
 
@@ -1382,6 +1415,7 @@ class X509Store:
             See :class:`X509StoreFlags` for available constants.
         :return: ``None`` if the verification flags were successfully set.
         """
+        self._ensure_mutable()
         _openssl_assert(_lib.X509_STORE_set_flags(self._store, flags) != 0)
 
     def set_time(self, vfy_time: datetime.datetime) -> None:
@@ -1400,6 +1434,7 @@ class X509Store:
         :param datetime vfy_time: The verification time to set on this store.
         :return: ``None`` if the verification time was successfully set.
         """
+        self._ensure_mutable()
         param = _lib.X509_VERIFY_PARAM_new()
         param = _ffi.gc(param, _lib.X509_VERIFY_PARAM_free)
 
@@ -1443,6 +1478,7 @@ class X509Store:
             or the locations could not be set for any reason.
 
         """
+        self._ensure_mutable()
         if cafile is None:
             cafile = _ffi.NULL
         else:

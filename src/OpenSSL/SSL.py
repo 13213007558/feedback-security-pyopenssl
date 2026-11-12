@@ -1684,6 +1684,16 @@ class Context:
         "trusted" certificates without using the
         :meth:`load_verify_locations` method.
 
+        The returned store is the trust store owned by this context. Every
+        call returns a wrapper around the same underlying store, therefore a
+        reference obtained before the context was used to create a
+        :class:`Connection` is governed by the same freeze contract as the
+        context itself: once the context has been used, attempts to mutate the
+        store (for example with :meth:`X509Store.add_cert` or
+        :meth:`X509Store.set_flags`) raise :class:`ValueError`. To rotate trust
+        configuration, build and configure a fresh :class:`Context` and switch
+        to it using :meth:`Connection.set_context`.
+
         :return: A X509Store object or None if it does not have one.
         """
         store = _lib.SSL_CTX_get_cert_store(self._context)
@@ -1693,6 +1703,7 @@ class Context:
 
         pystore = X509Store.__new__(X509Store)
         pystore._store = store
+        pystore._owner_context = self
         return pystore
 
     @_require_not_used
